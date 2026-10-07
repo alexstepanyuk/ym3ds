@@ -22,7 +22,6 @@ static bool cancelled(void *user) {
 static void wait_data(void *user) {
     Playback *p = user;
     if (!p->waiting) { app_status(p->app, "Буферизация: жду данные…"); p->waiting = true; }
-    ndspChnSetPaused(0, atomic_load(&p->app->paused));
     svcSleepThread(2000000);
 }
 static size_t read_mp3(void *buf, size_t size, void *user) {
@@ -63,7 +62,10 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
     s16 *pcm = linearAlloc(BLOCKS * SAMPLES * sizeof(s16));
     if (!pcm) { mp3dec_ex_close(decoder); fclose(file); free(decoder); return -1; }
     ndspWaveBuf buffers[BLOCKS] = {0};
+    LightLock_Lock(&app->lock);
     ndspChnReset(0);
+    ndspChnSetPaused(0, atomic_load(&app->paused));
+    LightLock_Unlock(&app->lock);
     ndspChnSetFormat(0, channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
     ndspChnSetRate(0, (float)sample_rate);
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
@@ -74,7 +76,6 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
     uint64_t completed_samples = 0;
     while (!app_cancelled(app, gen)) {
         bool paused = atomic_load(&app->paused);
-        ndspChnSetPaused(0, paused);
         ndspWaveBuf *b = &buffers[index];
         if (paused || (b->status != NDSP_WBUF_DONE && b->status != NDSP_WBUF_FREE)) {
             svcSleepThread(2000000); continue;
@@ -91,7 +92,6 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
             /* Drain the queued final blocks without dropping the end. */
             bool queued;
             do {
-                ndspChnSetPaused(0, atomic_load(&app->paused));
                 queued = false;
                 for (int i = 0; i < BLOCKS; ++i)
                     if (buffers[i].status == NDSP_WBUF_QUEUED || buffers[i].status == NDSP_WBUF_PLAYING) queued = true;
@@ -110,8 +110,12 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
         ndspChnWaveBufAdd(0, b);
         index = (index + 1) % BLOCKS;
     }
+    LightLock_Lock(&app->lock);
     ndspChnWaveBufClear(0);
     ndspChnSetPaused(0, false);
+    atomic_store(&app->paused, false);
+    app->playing = -1;
+    LightLock_Unlock(&app->lock);
     /* Channel commands reach DSP asynchronously. Keep PCM alive while the
      * stop command passes through both DSP command buffers. */
     u32 stopped_at = ndspGetFrameCount();

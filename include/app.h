@@ -33,4 +33,5 @@ void app_status(App *app, const char *format, ...);
 bool app_cancelled(App *app, int generation);
 void app_worker(void *arg);
 void app_request(App *app, int job);
+void app_toggle_pause(App *app);
 int player_play(App *app, int generation, Mp3Stream *stream);

@@ -23,6 +23,19 @@ void app_request(App *app, int job) {
     app->job = job;
     atomic_fetch_add(&app->generation, 1);
     atomic_store(&app->paused, false);
+    if (app->audio_ready) ndspChnSetPaused(0, false);
+    LightLock_Unlock(&app->lock);
+}
+
+void app_toggle_pause(App *app) {
+    /* Send the DSP command from the UI immediately, even when the decoder
+     * is busy reading SD data. The app lock also protects channel reset. */
+    LightLock_Lock(&app->lock);
+    if (app->audio_ready && app->playing >= 0) {
+        bool paused = !atomic_load(&app->paused);
+        atomic_store(&app->paused, paused);
+        ndspChnSetPaused(0, paused);
+    }
     LightLock_Unlock(&app->lock);
 }
 

@@ -74,6 +74,7 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     if (playing >= 0 && playing < count) current = app.tracks[playing];
     else if (selected < count) current = app.tracks[selected];
     LightLock_Unlock(&app.lock);
+    bool paused = playing >= 0 && atomic_load(&app.paused);
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C2D_TextBufClear(text_buffer);
@@ -117,13 +118,14 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
         snprintf(label, sizeof(label), "%d кбит/с", bitrate);
         text(label, 287, 173, 0.40f, 101, muted, false);
     }
-    text(exiting ? "Завершаю операцию…" : status, 12, 207, 0.40f, 376, muted, false);
+    text(exiting ? "Завершаю операцию…" : paused ? "Пауза — A: продолжить" : status,
+         12, 207, 0.40f, 376, paused ? accent : muted, false);
     if (loading && !download_complete && kb) {
-        if (total_kb) snprintf(label, sizeof(label), "Загрузка: %u%% · %u КБ", (unsigned)(downloaded * 100), kb);
-        else snprintf(label, sizeof(label), "Загружено: %u КБ", kb);
+        if (total_kb) snprintf(label, sizeof(label), "%s: %u%% · %u КБ", paused ? "Пауза / загрузка" : "Загрузка", (unsigned)(downloaded * 100), kb);
+        else snprintf(label, sizeof(label), "%s: %u КБ", paused ? "Пауза / загружено" : "Загружено", kb);
         text(label, 159, 190, 0.35f, 229, accent, false);
     } else if (playing >= 0) {
-        text(atomic_load(&app.paused) ? "Пауза" : "Воспроизведение", 159, 190, 0.35f, 229, accent, false);
+        text(paused ? "Пауза" : "Воспроизведение", 159, 190, 0.35f, 229, accent, false);
     }
 
     C2D_TargetClear(bottom, background);
@@ -139,7 +141,7 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     }
     if (!count) text("X — загрузить список\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
     C2D_DrawRectSolid(12, 208, 0, 296, 1, muted);
-    text("A: играть  Y: пауза  B: стоп", 12, 211, 0.40f, 296, white, false);
+    text("A: играть/пауза  Y: далее  B: стоп", 12, 211, 0.40f, 296, white, false);
     text("X: обновить  START: выход", 12, 226, 0.37f, 296, muted, false);
     C3D_FrameEnd(0);
 }
@@ -201,6 +203,7 @@ int main(void) {
         LightLock_Lock(&app.lock);
         int count = app.count;
         bool busy = app.loading;
+        int playing = app.playing;
         LightLock_Unlock(&app.lock);
         if (selected >= count) selected = count ? count - 1 : 0;
         if ((keys & KEY_DOWN) && selected + 1 < count) ++selected;
@@ -215,9 +218,24 @@ int main(void) {
                 if (tapped < count) { selected = tapped; app_request(&app, selected); }
             }
         }
-        if ((keys & KEY_A) && worker && count) app_request(&app, selected);
+        if ((keys & KEY_A) && worker && count) {
+            if (selected == playing) app_toggle_pause(&app);
+            else app_request(&app, selected);
+        }
         if ((keys & KEY_X) && worker) app_request(&app, -2);
-        if (keys & KEY_Y) atomic_store(&app.paused, !atomic_load(&app.paused));
+        if ((keys & KEY_Y) && worker && count) {
+            int next = -1;
+            LightLock_Lock(&app.lock);
+            int base = app.playing >= 0 ? app.playing : selected;
+            /* Wrap around and skip tracks unavailable to this account. */
+            for (int step = 1; step <= app.count; ++step) {
+                int candidate = (base + step) % app.count;
+                if (app.tracks[candidate].available) { next = candidate; break; }
+            }
+            LightLock_Unlock(&app.lock);
+            if (next >= 0) { selected = next; app_request(&app, next); }
+            else app_status(&app, "Нет доступных треков");
+        }
         if (keys & KEY_B) { app_request(&app, -1); app_status(&app, "Остановлено"); }
         draw(top, bottom, selected, false);
     }
