@@ -13,6 +13,9 @@ static C2D_TextBuf text_buffer;
 static u32 white, muted, accent, background;
 static bool battery_ready;
 static u8 battery_level, charging;
+#define LIST_ROWS 5
+#define LIST_Y 38
+#define LIST_ROW_HEIGHT 33
 
 static void status_bar(int width) {
     static time_t last_poll;
@@ -47,7 +50,7 @@ static void text(const char *s, float x, float y, float scale, float width, u32 
 }
 
 static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, bool exiting) {
-    YmTrack current = {0}, rows[6] = {0};
+    YmTrack current = {0}, rows[LIST_ROWS] = {0};
     char status[256], label[64];
     int count, playing, start;
     unsigned kb;
@@ -63,8 +66,8 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     rate = app.sample_rate;
     bitrate = app.bitrate_kbps;
     strcpy(status, app.status);
-    start = selected / 6 * 6;
-    for (int i = 0; i < 6 && start + i < count; ++i) rows[i] = app.tracks[start + i];
+    start = selected / LIST_ROWS * LIST_ROWS;
+    for (int i = 0; i < LIST_ROWS && start + i < count; ++i) rows[i] = app.tracks[start + i];
     if (playing >= 0 && playing < count) current = app.tracks[playing];
     else if (selected < count) current = app.tracks[selected];
     LightLock_Unlock(&app.lock);
@@ -120,11 +123,11 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     snprintf(label, sizeof(label), "Мне нравится       %d/%d", count ? selected + 1 : 0, count);
     text(label, 12, 8, 0.53f, 296, white, false);
     C2D_DrawRectSolid(12, 30, 0, 296, 1, muted);
-    for (int i = 0; i < 6 && start + i < count; ++i) {
-        float y = 38 + i * 28;
-        if (start + i == selected) C2D_DrawRectSolid(8, y + 2, 0, 3, 23, accent);
+    for (int i = 0; i < LIST_ROWS && start + i < count; ++i) {
+        float y = LIST_Y + i * LIST_ROW_HEIGHT;
+        if (start + i == selected) C2D_DrawRectSolid(8, y + 2, 0, 3, 28, accent);
         text(rows[i].title, 18, y, 0.44f, 290, rows[i].available ? white : muted, false);
-        text(rows[i].artist, 18, y + 15, 0.29f, 290, muted, false);
+        text(rows[i].artist, 18, y + 17, 0.38f, 290, C2D_Color32(195, 195, 195, 255), false);
     }
     if (!count) text("X — загрузить список\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
     C2D_DrawRectSolid(12, 208, 0, 296, 1, muted);
@@ -194,13 +197,13 @@ int main(void) {
         if (selected >= count) selected = count ? count - 1 : 0;
         if ((keys & KEY_DOWN) && selected + 1 < count) ++selected;
         if ((keys & KEY_UP) && selected > 0) --selected;
-        if ((keys & KEY_RIGHT) && count) selected = selected + 6 < count ? selected + 6 : count - 1;
-        if (keys & KEY_LEFT) selected = selected >= 6 ? selected - 6 : 0;
+        if ((keys & KEY_RIGHT) && count) selected = selected + LIST_ROWS < count ? selected + LIST_ROWS : count - 1;
+        if (keys & KEY_LEFT) selected = selected >= LIST_ROWS ? selected - LIST_ROWS : 0;
         if ((keys & KEY_TOUCH) && worker && !busy) {
             touchPosition touch;
             hidTouchRead(&touch);
-            if (touch.py >= 38 && touch.py < 206) {
-                int tapped = selected / 6 * 6 + (touch.py - 38) / 28;
+            if (touch.py >= LIST_Y && touch.py < LIST_Y + LIST_ROWS * LIST_ROW_HEIGHT) {
+                int tapped = selected / LIST_ROWS * LIST_ROWS + (touch.py - LIST_Y) / LIST_ROW_HEIGHT;
                 if (tapped < count) { selected = tapped; app_request(&app, selected); }
             }
         }
