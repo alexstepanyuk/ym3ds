@@ -13,9 +13,9 @@ static C2D_TextBuf text_buffer;
 static u32 white, muted, accent, background;
 static bool battery_ready;
 static u8 battery_level, charging;
-#define LIST_ROWS 5
+#define LIST_ROWS 6
 #define LIST_Y 38
-#define LIST_ROW_HEIGHT 33
+#define LIST_ROW_HEIGHT 28
 
 static void status_bar(int width) {
     static time_t last_poll;
@@ -125,9 +125,9 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     C2D_DrawRectSolid(12, 30, 0, 296, 1, muted);
     for (int i = 0; i < LIST_ROWS && start + i < count; ++i) {
         float y = LIST_Y + i * LIST_ROW_HEIGHT;
-        if (start + i == selected) C2D_DrawRectSolid(8, y + 2, 0, 3, 28, accent);
+        if (start + i == selected) C2D_DrawRectSolid(8, y + 2, 0, 3, 23, accent);
         text(rows[i].title, 18, y, 0.44f, 290, rows[i].available ? white : muted, false);
-        text(rows[i].artist, 18, y + 17, 0.38f, 290, C2D_Color32(195, 195, 195, 255), false);
+        text(rows[i].artist, 18, y + 15, 0.38f, 290, muted, false);
     }
     if (!count) text("X — загрузить список\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
     C2D_DrawRectSolid(12, 208, 0, 296, 1, muted);
