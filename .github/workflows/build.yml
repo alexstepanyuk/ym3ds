@@ -1,0 +1,25 @@
+name: Сборка прототипа для 3DS
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Установка библиотек
+        run: dkp-pacman -Syu --noconfirm 3ds-dev 3ds-curl 3ds-mbedtls 3ds-zlib
+      - name: Компиляция
+        run: make -j2
+      - name: Подготовка файлов для SD
+        run: |
+          mkdir -p release/3ds/ym3ds/config
+          cp ym3ds.3dsx ym3ds.smdh release/3ds/ym3ds/
+          cp config/token.example.txt release/3ds/ym3ds/config/token.txt
+          cp config/cacert.pem release/3ds/ym3ds/config/
+          cp README.md LICENSE.upstream THIRD_PARTY.md release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ym3ds-sd
+          path: release/

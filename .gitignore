@@ -1,0 +1,12 @@
+upstream/
+references/
+tools/cache/
+tools/devkitpro/
+tools/zig/
+build/
+release/
+*.elf
+*.3dsx
+*.smdh
+config/token.txt
+__pycache__/

@@ -1,0 +1,178 @@
+#include "net.h"
+#include <mbedtls/md.h>
+#include <mbedtls/base64.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define JSON_LIMIT (2 * 1024 * 1024)
+#define AUDIO_LIMIT (32 * 1024 * 1024)
+
+typedef struct {
+    App *app;
+    int generation;
+    char *data;
+    size_t size;
+    FILE *file;
+} Transfer;
+
+static int progress(void *user, curl_off_t total, curl_off_t now,
+                    curl_off_t upload_total, curl_off_t upload_now) {
+    (void)total; (void)upload_total; (void)upload_now;
+    Transfer *t = user;
+    if (t->file) {
+        LightLock_Lock(&t->app->lock);
+        t->app->downloaded_kb = (unsigned)(now / 1024);
+        LightLock_Unlock(&t->app->lock);
+    }
+    return app_cancelled(t->app, t->generation);
+}
+
+static size_t write_body(char *data, size_t size, size_t n, void *user) {
+    Transfer *t = user;
+    if (size && n > SIZE_MAX / size) return 0;
+    size_t bytes = size * n;
+    size_t limit = t->file ? AUDIO_LIMIT : JSON_LIMIT;
+    if (app_cancelled(t->app, t->generation) || bytes > limit - t->size) return 0;
+    if (t->file) {
+        size_t written = fwrite(data, 1, bytes, t->file);
+        t->size += written;
+        return written;
+    }
+    char *next = realloc(t->data, t->size + bytes + 1);
+    if (!next) return 0;
+    t->data = next;
+    memcpy(next + t->size, data, bytes);
+    t->size += bytes;
+    next[t->size] = 0;
+    return bytes;
+}
+
+static CURL *request(Transfer *t, const char *url) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, YM_CA_FILE);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, t->file ? 300L : 60L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 20L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "YM3DS/0.1");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, t);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, t);
+    return curl;
+}
+
+static int perform(CURL *curl, Transfer *t) {
+    CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (app_cancelled(t->app, t->generation)) return -1;
+    if (rc != CURLE_OK) {
+        const char *message = "Ошибка сетевого запроса";
+        switch (rc) {
+            case CURLE_COULDNT_RESOLVE_HOST: message = "Не удалось найти сервер (DNS)"; break;
+            case CURLE_COULDNT_CONNECT: message = "Нет соединения с сервером"; break;
+            case CURLE_OPERATION_TIMEDOUT: message = "Превышено время ожидания"; break;
+            case CURLE_PEER_FAILED_VERIFICATION: message = "Проверь дату консоли и файл cacert.pem"; break;
+            case CURLE_SSL_CACERT_BADFILE: message = "Не удалось прочитать cacert.pem"; break;
+            case CURLE_WRITE_ERROR: message = "Ошибка записи или превышен лимит данных"; break;
+            default: break;
+        }
+        app_status(t->app, "%s (код %d)", message, (int)rc);
+        return -1;
+    }
+    if (status != 200 || !t->size) {
+        app_status(t->app, "HTTP %ld. Проверь токен и подписку.", status);
+        return -1;
+    }
+    return 0;
+}
+
+int net_json(App *app, int gen, const char *path, const char *token,
+             const char *post, char **out) {
+    *out = NULL;
+    char url[1024], auth[512];
+    if (*path != '/' || strlen(path) + 29 >= sizeof(url) || strlen(token) > 450) return -1;
+    snprintf(url, sizeof(url), "https://api.music.yandex.net%s", path);
+    snprintf(auth, sizeof(auth), "Authorization: OAuth %s", token);
+    Transfer t = {.app = app, .generation = gen};
+    CURL *curl = request(&t, url);
+    if (!curl) { app_status(app, "Не удалось создать HTTP-запрос"); return -1; }
+    struct curl_slist *headers = curl_slist_append(NULL, auth);
+    if (!headers) { curl_easy_cleanup(curl); return -1; }
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    /* Do not forward credentials through redirects. */
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    if (post) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post);
+    int rc = perform(curl, &t);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    memset(auth, 0, sizeof(auth));
+    if (rc) free(t.data);
+    else *out = t.data;
+    return rc;
+}
+
+int net_download(App *app, int gen, const char *url) {
+    if (strncmp(url, "https://", 8)) return -1;
+    const char *temp = YM_AUDIO_FILE ".part";
+    Transfer t = {.app = app, .generation = gen, .file = fopen(temp, "wb")};
+    if (!t.file) { app_status(app, "Не удалось открыть кэш на SD"); return -1; }
+    CURL *curl = request(&t, url);
+    int rc = -1;
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+        rc = perform(curl, &t);
+        curl_easy_cleanup(curl);
+    } else app_status(app, "Не удалось создать HTTP-запрос");
+    if (fclose(t.file)) { rc = -1; app_status(app, "Ошибка записи на SD"); }
+    if (!rc && app_cancelled(app, gen)) rc = -1;
+    if (!rc) {
+        remove(YM_AUDIO_FILE);
+        if (rename(temp, YM_AUDIO_FILE)) { rc = -1; app_status(app, "Ошибка сохранения кэша"); }
+    }
+    if (rc) remove(temp);
+    return rc;
+}
+
+/* Protocol adapted from amdray/yandex_music_psp, ym_api_download.c (MIT).
+ * This is a client protocol key, not a user's OAuth token. */
+int net_file_info_path(const char *id, char *out, size_t cap) {
+    static const char secret[] = "kzqU4XhfCaY6B6JTHODeq5";
+    if (!ym_id_valid(id)) return -1;
+    time_t now = time(NULL);
+    if (now < 1700000000) return -1;
+    char input[128], encoded[128], b64[64];
+    unsigned char digest[32];
+    int n = snprintf(input, sizeof(input), "%lld%snqmp3raw", (long long)now, id);
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md || n < 0 || (size_t)n >= sizeof(input) ||
+        mbedtls_md_hmac(md, (const unsigned char *)secret, strlen(secret),
+                        (const unsigned char *)input, (size_t)n, digest)) return -1;
+    size_t len = 0;
+    if (mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &len, digest, sizeof(digest))) return -1;
+    while (len && b64[len - 1] == '=') --len;
+    size_t used = 0;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)b64[i];
+        if (c == '+' || c == '/') {
+            snprintf(encoded + used, sizeof(encoded) - used, "%%%02X", c);
+            used += 3;
+        } else encoded[used++] = (char)c;
+    }
+    encoded[used] = 0;
+    n = snprintf(out, cap, "/get-file-info?ts=%lld&trackId=%s&quality=nq&codecs=mp3&sign=%s&transports=raw",
+                 (long long)now, id, encoded);
+    return n >= 0 && (size_t)n < cap ? 0 : -1;
+}
