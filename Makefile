@@ -7,7 +7,7 @@ include $(DEVKITARM)/3ds_rules
 TARGET := ym3ds
 BUILD := build
 SOURCES := source vendor/cjson
-INCLUDES := include vendor/cjson vendor/minimp3
+INCLUDES := include vendor/cjson vendor/minimp3 vendor/stb
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS := -O2 -g -Wall -Wextra -std=gnu11 -mword-relocations -ffunction-sections $(ARCH)
 CFLAGS += $(INCLUDE) -D__3DS__

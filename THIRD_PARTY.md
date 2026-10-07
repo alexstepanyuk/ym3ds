@@ -10,6 +10,10 @@ Copyright (c) 2026 amdray; лицензия MIT сохранена в `LICENSE.u
   Коммит `ea99364f61c14656440e8d77e9c233ccf3124633`.
   В `minimp3_ex.h` добавлена возможность переопределить `MINIMP3_IO_SIZE`;
   плеер использует буфер 32 КиБ вместо стандартных 128 КиБ.
+- stb_image — JPEG/PNG-декодер в `vendor/stb/stb_image.h`,
+  коммит `f58f558c120e9b32c217290b80bad1a0729fbb2c` репозитория
+  https://github.com/nothings/stb. Лицензии MIT/public domain сохранены в файле;
+  используется вариант MIT.
 - Сертификаты CA Mozilla получены с https://curl.se/ca/cacert.pem
   07.10.2026; происхождение и лицензия указаны в заголовке PEM.
 - Сборка для Nintendo 3DS использует devkitPro libctru, citro2d, citro3d,

@@ -8,6 +8,10 @@ try {
     if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверки API' }
     & ./build/host/model_test.exe
     if ($LASTEXITCODE) { throw 'Проверки API завершились с ошибкой' }
+    & $Zig cc -std=c11 -O2 -UNDEBUG -Wall -Wextra -Werror -Iinclude -Ivendor/stb source/cover.c tests/cover_test.c -o build/host/cover_test.exe
+    if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку обложек' }
+    & ./build/host/cover_test.exe
+    if ($LASTEXITCODE) { throw 'Проверка обложек завершилась с ошибкой' }
     if ($Mp3) {
         & $Zig cc -std=c11 -O2 -UNDEBUG -Wall -Wextra -Werror -Iinclude -Ivendor/minimp3 source/stream.c tests/decode_test.c -o build/host/decode_test.exe
         if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку MP3' }

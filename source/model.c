@@ -3,6 +3,9 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <stdint.h>
 
 static cJSON *field(const cJSON *o, const char *key) {
     return cJSON_GetObjectItemCaseSensitive(o, key);
@@ -120,11 +123,103 @@ int ym_tracks_parse(const char *json, YmTrack *tracks, size_t count) {
             }
             t->available = !cJSON_IsFalse(field(item, "available")) &&
                            !*string(field(item, "error"));
+            t->loaded = true;
+            const char *cover = string(field(item, "coverUri"));
+            if (!*cover) cover = string(field(cJSON_GetArrayItem(field(item, "albums"), 0), "coverUri"));
+            if (strlen(cover) < sizeof(t->cover)) strcpy(t->cover, cover);
             ++resolved;
         }
     }
     cJSON_Delete(root);
     return resolved;
+}
+
+int ym_track_list_parse(const char *json, bool playlist, YmTrack **out) {
+    *out = NULL;
+    cJSON *root = cJSON_Parse(json);
+    cJSON *result = field(root, "result");
+    if (playlist && cJSON_IsArray(result)) result = cJSON_GetArrayItem(result, 0);
+    cJSON *items = playlist ? field(result, "tracks") : field(field(result, "library"), "tracks");
+    if (!cJSON_IsArray(items)) { cJSON_Delete(root); return -1; }
+    int count = cJSON_GetArraySize(items);
+    if (count < 0 || (size_t)count > SIZE_MAX / sizeof(YmTrack)) { cJSON_Delete(root); return -1; }
+    YmTrack *tracks = count ? calloc((size_t)count, sizeof(*tracks)) : NULL;
+    if (count && !tracks) { cJSON_Delete(root); return -1; }
+    int used = 0;
+    cJSON *item;
+    cJSON_ArrayForEach(item, items) {
+        if (id_parse(field(item, "id"), tracks[used].id)) continue;
+        snprintf(tracks[used].title, sizeof(tracks[used].title), "Трек %s", tracks[used].id);
+        ++used;
+    }
+    cJSON_Delete(root);
+    *out = tracks;
+    return used;
+}
+
+int ym_playlists_parse(const char *json, bool liked, const char *owner, YmPlaylist **out) {
+    *out = NULL;
+    cJSON *root = cJSON_Parse(json), *items = field(root, "result");
+    if (!cJSON_IsArray(items)) { cJSON_Delete(root); return -1; }
+    int count = cJSON_GetArraySize(items), used = 0;
+    if (count < 0 || (size_t)count > SIZE_MAX / sizeof(YmPlaylist)) { cJSON_Delete(root); return -1; }
+    YmPlaylist *list = count ? calloc((size_t)count, sizeof(*list)) : NULL;
+    if (count && !list) { cJSON_Delete(root); return -1; }
+    cJSON *entry;
+    cJSON_ArrayForEach(entry, items) {
+        cJSON *item = liked ? field(entry, "playlist") : entry;
+        YmPlaylist p = {0};
+        if (id_parse(field(item, "kind"), p.kind)) continue;
+        if (id_parse(field(field(item, "owner"), "uid"), p.owner) &&
+            id_parse(field(item, "uid"), p.owner)) {
+            if (liked || !ym_id_valid(owner)) continue;
+            strcpy(p.owner, owner);
+        }
+        ym_text_copy(p.title, sizeof(p.title), string(field(item, "title")));
+        cJSON *n = field(item, "trackCount");
+        if (cJSON_IsNumber(n) && n->valuedouble >= 0 && n->valuedouble < UINT_MAX) p.track_count = (unsigned)n->valuedouble;
+        list[used++] = p;
+    }
+    cJSON_Delete(root);
+    *out = list;
+    return used;
+}
+
+int ym_cover_url(const char *uri, char *out, size_t cap) {
+    if (!cap) return -1;
+    out[0] = 0;
+    if (!uri || !*uri) return -1;
+    const char *host = uri;
+    if (!strncmp(host, "https://", 8)) host += 8;
+    else if (!strncmp(host, "http://", 7)) host += 7;
+    if (strncmp(host, "avatars.yandex.net/", 19) && strncmp(host, "avatars.mds.yandex.net/", 23)) return -1;
+    for (const char *p = host; *p; ++p) if ((unsigned char)*p <= 32 || *p == '\\') return -1;
+    const char *slot = strstr(host, "%%");
+    int n = slot ? snprintf(out, cap, "https://%.*s100x100%s", (int)(slot - host), host, slot + 2) :
+                   snprintf(out, cap, "https://%s", host);
+    if (n < 0 || (size_t)n >= cap) { out[0] = 0; return -1; }
+    return 0;
+}
+
+int ym_track_next(const YmTrack *tracks, int count, int current, int direction,
+                  bool shuffle, unsigned random_value) {
+    if (!tracks || count <= 0) return -1;
+    if (current < 0 || current >= count) current = 0;
+    if (shuffle) {
+        int eligible = 0;
+        for (int i = 0; i < count; ++i)
+            if (i != current && (tracks[i].available || !tracks[i].loaded)) ++eligible;
+        if (!eligible) return tracks[current].available || !tracks[current].loaded ? current : -1;
+        unsigned chosen = random_value % (unsigned)eligible;
+        for (int i = 0; i < count; ++i)
+            if (i != current && (tracks[i].available || !tracks[i].loaded) && chosen-- == 0) return i;
+    } else {
+        for (int step = 1; step <= count; ++step) {
+            int next = (current + (direction < 0 ? -step : step) + count) % count;
+            if (tracks[next].available || !tracks[next].loaded) return next;
+        }
+    }
+    return -1;
 }
 
 int ym_download_parse(const char *json, char *url, size_t cap) {

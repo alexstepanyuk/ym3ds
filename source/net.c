@@ -22,6 +22,8 @@ typedef struct {
     const char *stage;
     time_t server_date;
     Mp3Stream *stream;
+    size_t limit;
+    bool silent;
 } Transfer;
 
 static size_t read_header(char *data, size_t size, size_t count, void *user) {
@@ -55,7 +57,7 @@ static size_t write_body(char *data, size_t size, size_t n, void *user) {
     Transfer *t = user;
     if (size && n > SIZE_MAX / size) return 0;
     size_t bytes = size * n;
-    size_t limit = t->file ? AUDIO_LIMIT : JSON_LIMIT;
+    size_t limit = t->limit ? t->limit : t->file ? AUDIO_LIMIT : JSON_LIMIT;
     if (app_cancelled(t->app, t->generation) ||
         (t->stream && atomic_load(&t->stream->stop)) || bytes > limit - t->size) return 0;
     if (t->file) {
@@ -83,8 +85,8 @@ static CURL *request(Transfer *t, const char *url) {
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, t->file ? 300L : 60L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, t->silent ? 4L : 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, t->silent ? 8L : t->file ? 300L : 60L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 20L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -104,6 +106,7 @@ static int perform(CURL *curl, Transfer *t) {
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     if (app_cancelled(t->app, t->generation) || (t->stream && atomic_load(&t->stream->stop))) return -1;
+    if (t->silent) return rc == CURLE_OK && status == 200 && t->size ? 0 : -1;
     if (rc == CURLE_HTTP_RETURNED_ERROR) {
         if (t->stream) atomic_store(&t->stream->failed, true);
         app_status(t->app, "%s: HTTP %ld", t->stage, status); return -1;
@@ -159,6 +162,21 @@ int net_json(App *app, int gen, const char *path, const char *token,
     memset(auth, 0, sizeof(auth));
     if (rc) free(t.data);
     else *out = t.data;
+    return rc;
+}
+
+int net_cover(App *app, int gen, const char *uri, unsigned char **bytes, size_t *size) {
+    *bytes = NULL; *size = 0;
+    char url[512];
+    if (ym_cover_url(uri, url, sizeof(url))) return -1;
+    Transfer t = {.app = app, .generation = gen, .stage = "Обложка", .limit = 512 * 1024, .silent = true};
+    CURL *curl = request(&t, url);
+    if (!curl) return -1;
+    /* No redirects and no authorization headers for artwork. */
+    int rc = perform(curl, &t);
+    curl_easy_cleanup(curl);
+    if (rc) free(t.data);
+    else { *bytes = (unsigned char *)t.data; *size = t.size; }
     return rc;
 }
 

@@ -14,11 +14,12 @@ typedef struct {
     atomic_int generation;
     atomic_bool quitting;
     atomic_bool paused;
-    int job; /* -2: reload, -1: none, otherwise track index */
+    int job; /* -3: playlists, -2: likes, -1: none, <= -4: open playlist */
     int count;
     int playing;
     bool loading;
     bool audio_ready;
+    bool shuffle, repeat_one;
     unsigned downloaded_kb;
     unsigned download_total_kb;
     bool download_complete;
@@ -26,7 +27,16 @@ typedef struct {
     int sample_rate;
     int bitrate_kbps;
     char status[256];
-    YmTrack tracks[YM_MAX_TRACKS];
+    YmTrack *tracks;
+    YmPlaylist *playlists;
+    int playlist_count;
+    bool playlist_view;
+    bool hydration_pending;
+    unsigned library_revision;
+    char uid[YM_ID_SIZE], collection[YM_TEXT_SIZE];
+    unsigned char *cover_pixels;
+    unsigned cover_revision;
+    char cover_id[YM_ID_SIZE];
 } App;
 
 void app_status(App *app, const char *format, ...);

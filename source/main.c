@@ -13,6 +13,14 @@ static C2D_TextBuf text_buffer;
 static u32 white, muted, accent, background;
 static bool battery_ready;
 static u8 battery_level, charging;
+static C3D_Tex cover_texture;
+static bool cover_texture_ready, cover_visible;
+static unsigned uploaded_cover;
+static unsigned char cover_upload[128 * 128 * 4];
+static const Tex3DS_SubTexture cover_subtexture = {
+    .width = 100, .height = 100, .left = 0, .top = 1,
+    .right = 100.0f / 128, .bottom = 28.0f / 128
+};
 #define LIST_ROWS 6
 #define LIST_Y 38
 #define LIST_ROW_HEIGHT 28
@@ -51,17 +59,21 @@ static void text(const char *s, float x, float y, float scale, float width, u32 
 
 static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, bool exiting) {
     YmTrack current = {0}, rows[LIST_ROWS] = {0};
-    char status[256], label[64];
+    char status[256], label[128], collection[YM_TEXT_SIZE];
     int count, playing, start;
     unsigned kb, total_kb;
     bool download_complete;
-    bool loading;
+    bool loading, shuffle, repeat_one, playlist_view, update_cover = false;
     unsigned position;
     int rate, bitrate;
     LightLock_Lock(&app.lock);
-    count = app.count;
+    playlist_view = app.playlist_view;
+    count = playlist_view ? app.playlist_count : app.count;
+    strcpy(collection, playlist_view ? "Плейлисты" : app.collection);
     playing = app.playing;
     loading = app.loading;
+    shuffle = app.shuffle;
+    repeat_one = app.repeat_one;
     kb = app.downloaded_kb;
     total_kb = app.download_total_kb;
     download_complete = app.download_complete;
@@ -70,13 +82,29 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     bitrate = app.bitrate_kbps;
     strcpy(status, app.status);
     start = selected / LIST_ROWS * LIST_ROWS;
-    for (int i = 0; i < LIST_ROWS && start + i < count; ++i) rows[i] = app.tracks[start + i];
-    if (playing >= 0 && playing < count) current = app.tracks[playing];
-    else if (selected < count) current = app.tracks[selected];
+    for (int i = 0; i < LIST_ROWS && start + i < count; ++i) {
+        if (!playlist_view) rows[i] = app.tracks[start + i];
+        else {
+            YmPlaylist *p = &app.playlists[start + i];
+            strcpy(rows[i].title, p->title);
+            if (start + i) snprintf(rows[i].artist, sizeof(rows[i].artist), "%u треков", p->track_count);
+            else strcpy(rows[i].artist, "Любимые песни");
+            rows[i].available = true;
+        }
+    }
+    if (playing >= 0 && playing < app.count) current = app.tracks[playing];
+    else if (!playlist_view && selected >= 0 && selected < app.count) current = app.tracks[selected];
+    if (cover_texture_ready && uploaded_cover != app.cover_revision) {
+        uploaded_cover = app.cover_revision;
+        cover_visible = app.cover_pixels != NULL;
+        if (cover_visible) { memcpy(cover_upload, app.cover_pixels, sizeof(cover_upload)); update_cover = true; }
+    }
+    bool draw_cover = cover_visible && !strcmp(current.id, app.cover_id) && current.id[0];
     LightLock_Unlock(&app.lock);
     bool paused = playing >= 0 && atomic_load(&app.paused);
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    if (update_cover) C3D_TexUpload(&cover_texture, cover_upload);
     C2D_TextBufClear(text_buffer);
     C2D_TargetClear(top, background);
     C2D_SceneBegin(top);
@@ -89,12 +117,13 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     text("YM3DS", 45, 5, 0.40f, 80, muted, false);
     text("Сейчас играет", 12, 28, 0.57f, 300, white, false);
     C2D_DrawRectSolid(12, 49, 0, 376, 1, muted);
-    /* Neutral record placeholder until real album artwork is supported. */
+    /* Fallback record when artwork is unavailable. */
     C2D_DrawRectSolid(12, 63, 0, 132, 132, C2D_Color32(49, 49, 49, 255));
     C2D_DrawCircleSolid(78, 129, 0, 49, C2D_Color32(28, 28, 28, 255));
     C2D_DrawCircleSolid(78, 129, 0, 31, C2D_Color32(44, 44, 44, 255));
     C2D_DrawCircleSolid(78, 129, 0, 15, accent);
     C2D_DrawCircleSolid(78, 129, 0, 3, background);
+    if (draw_cover) C2D_DrawImageAt((C2D_Image){&cover_texture, &cover_subtexture}, 12, 63, 0, NULL, 1.32f, 1.32f);
     text("MP3", 159, 62, 0.36f, 48, accent, false);
     text(current.title[0] ? current.title : "Яндекс Музыка", 159, 84, 0.57f, 229, white, false);
     text(current.artist, 159, 108, 0.43f, 229, muted, false);
@@ -130,7 +159,9 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
 
     C2D_TargetClear(bottom, background);
     C2D_SceneBegin(bottom);
-    snprintf(label, sizeof(label), "Мне нравится       %d/%d", count ? selected + 1 : 0, count);
+    ym_text_copy(label, 81, collection);
+    size_t label_size = strlen(label);
+    snprintf(label + label_size, sizeof(label) - label_size, "  %d/%d", count ? selected + 1 : 0, count);
     text(label, 12, 8, 0.53f, 296, white, false);
     C2D_DrawRectSolid(12, 30, 0, 296, 1, muted);
     for (int i = 0; i < LIST_ROWS && start + i < count; ++i) {
@@ -139,10 +170,11 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
         text(rows[i].title, 18, y, 0.44f, 290, rows[i].available ? white : muted, false);
         text(rows[i].artist, 18, y + 15, 0.38f, 290, muted, false);
     }
-    if (!count) text("X — загрузить список\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
+    if (!count) text("X — библиотека\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
     C2D_DrawRectSolid(12, 208, 0, 296, 1, muted);
-    text("A: играть/пауза  Y: далее  B: стоп", 12, 211, 0.40f, 296, white, false);
-    text("X: обновить  START: выход", 12, 226, 0.37f, 296, muted, false);
+    text(playlist_view ? "A: открыть  X: любимые  B: назад" : "A: играть/пауза  L/R: трек  X: списки", 12, 211, 0.40f, 296, white, false);
+    snprintf(label, sizeof(label), "Y: микс %s  SELECT: повтор %s", shuffle ? "вкл" : "выкл", repeat_one ? "1" : "выкл");
+    text(label, 12, 226, 0.37f, 296, muted, false);
     C3D_FrameEnd(0);
 }
 
@@ -167,6 +199,10 @@ int main(void) {
     atomic_init(&app.generation, 1);
     atomic_init(&app.quitting, false);
     atomic_init(&app.paused, false);
+    srand((unsigned)time(NULL));
+    strcpy(app.collection, "Мне нравится");
+    cover_texture_ready = C3D_TexInit(&cover_texture, 128, 128, GPU_RGBA8);
+    if (cover_texture_ready) C3D_TexSetFilter(&cover_texture, GPU_LINEAR, GPU_LINEAR);
     app.job = -1;
     app.playing = -1;
     mkdir("sdmc:/3ds", 0777);
@@ -196,12 +232,15 @@ int main(void) {
     if (worker) app_request(&app, -2);
     else app_status(&app, "Не удалось запустить сеть или рабочий поток");
     int selected = 0;
+    unsigned library_revision = 0;
     while (aptMainLoop()) {
         hidScanInput();
         u32 keys = hidKeysDown();
         if (keys & KEY_START) break;
         LightLock_Lock(&app.lock);
-        int count = app.count;
+        bool playlist_view = app.playlist_view;
+        int count = playlist_view ? app.playlist_count : app.count;
+        if (library_revision != app.library_revision) { selected = 0; library_revision = app.library_revision; }
         bool busy = app.loading;
         int playing = app.playing;
         LightLock_Unlock(&app.lock);
@@ -215,28 +254,38 @@ int main(void) {
             hidTouchRead(&touch);
             if (touch.py >= LIST_Y && touch.py < LIST_Y + LIST_ROWS * LIST_ROW_HEIGHT) {
                 int tapped = selected / LIST_ROWS * LIST_ROWS + (touch.py - LIST_Y) / LIST_ROW_HEIGHT;
-                if (tapped < count) { selected = tapped; app_request(&app, selected); }
+                if (tapped < count) { selected = tapped; app_request(&app, playlist_view ? -4 - selected : selected); }
             }
         }
         if ((keys & KEY_A) && worker && count) {
-            if (selected == playing) app_toggle_pause(&app);
+            if (playlist_view) app_request(&app, -4 - selected);
+            else if (selected == playing) app_toggle_pause(&app);
             else app_request(&app, selected);
         }
-        if ((keys & KEY_X) && worker) app_request(&app, -2);
-        if ((keys & KEY_Y) && worker && count) {
-            int next = -1;
+        if ((keys & KEY_X) && worker) app_request(&app, playlist_view ? -2 : -3);
+        if (keys & (KEY_Y | KEY_SELECT)) {
+            LightLock_Lock(&app.lock);
+            if (keys & KEY_Y) app.shuffle = !app.shuffle;
+            if (keys & KEY_SELECT) app.repeat_one = !app.repeat_one;
+            LightLock_Unlock(&app.lock);
+        }
+        if ((keys & (KEY_L | KEY_R)) && worker && count && !playlist_view) {
             LightLock_Lock(&app.lock);
             int base = app.playing >= 0 ? app.playing : selected;
-            /* Wrap around and skip tracks unavailable to this account. */
-            for (int step = 1; step <= app.count; ++step) {
-                int candidate = (base + step) % app.count;
-                if (app.tracks[candidate].available) { next = candidate; break; }
-            }
+            bool previous = (keys & KEY_L) != 0;
+            int next = ym_track_next(app.tracks, app.count, base, previous ? -1 : 1,
+                                     !previous && app.shuffle, (unsigned)rand());
             LightLock_Unlock(&app.lock);
             if (next >= 0) { selected = next; app_request(&app, next); }
             else app_status(&app, "Нет доступных треков");
         }
-        if (keys & KEY_B) { app_request(&app, -1); app_status(&app, "Остановлено"); }
+        if (keys & KEY_B) {
+            if (playlist_view) {
+                app_request(&app, -1);
+                LightLock_Lock(&app.lock); app.playlist_view = false; ++app.library_revision; LightLock_Unlock(&app.lock);
+            }
+            else { app_request(&app, -1); app_status(&app, "Остановлено"); }
+        }
         draw(top, bottom, selected, false);
     }
     atomic_store(&app.quitting, true);
@@ -252,6 +301,9 @@ int main(void) {
     if (curl_ready) curl_global_cleanup();
     if (soc_ready) socExit();
     free(soc_buffer);
+    free(app.tracks); free(app.playlists); free(app.cover_pixels);
+    C3D_FrameSync();
+    if (cover_texture_ready) C3D_TexDelete(&cover_texture);
     C2D_TextBufDelete(text_buffer);
     C2D_Fini();
     C3D_Fini();
