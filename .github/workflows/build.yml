@@ -8,8 +8,10 @@ jobs:
     container: devkitpro/devkitarm:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Установка библиотек
-        run: dkp-pacman -Syu --noconfirm 3ds-dev 3ds-curl 3ds-mbedtls 3ds-zlib
+      - name: Проверка библиотек контейнера
+        run: |
+          dkp-pacman -Q devkitARM libctru citro2d citro3d 3ds-curl 3ds-mbedtls 3ds-zlib
+          arm-none-eabi-gcc --version
       - name: Компиляция
         run: make -j2
       - name: Подготовка файлов для SD
