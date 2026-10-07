@@ -24,6 +24,7 @@ void app_request(App *app, int job) {
     app->job = job;
     atomic_fetch_add(&app->generation, 1);
     atomic_store(&app->paused, false);
+    atomic_store(&app->seek_seconds, 0);
     if (app->audio_ready) ndspChnSetPaused(0, false);
     LightLock_Unlock(&app->lock);
 }
@@ -195,6 +196,7 @@ static void play(App *app, int gen, int index, const char *token) {
     if (index < 0 || index >= app->count) { LightLock_Unlock(&app->lock); return; }
     track = app->tracks[index];
     bool ready = app->audio_ready;
+    bool high_quality = app->high_quality;
     LightLock_Unlock(&app->lock);
     if (!track.loaded) {
         if (hydrate(app, gen, index / 25 * 25, token)) return;
@@ -205,7 +207,7 @@ static void play(App *app, int gen, int index, const char *token) {
     if (!ready) { app_status(app, "Нет прошивки DSP: нужен dspfirm.cdc"); return; }
     if (!track.available) { app_status(app, "Этот трек недоступен"); return; }
     char path[512], url[2048], *json = NULL;
-    if (net_file_info_path(track.id, path, sizeof(path))) {
+    if (net_file_info_path(track.id, high_quality, path, sizeof(path))) {
         app_status(app, "Проверь дату и время консоли"); return;
     }
     app_status(app, "Получаю MP3…");
@@ -241,6 +243,7 @@ static void play(App *app, int gen, int index, const char *token) {
     if (!downloader) { remove(YM_AUDIO_FILE ".part"); app_status(app, "Не удалось запустить загрузку"); return; }
     LightLock_Lock(&app->lock);
     app->playing = index;
+    ++app->playback_revision;
     LightLock_Unlock(&app->lock);
     /* About 2.7 s at 192 kbit/s. Small files start once fully downloaded. */
     while (atomic_load(&download.stream.available) < 64 * 1024 &&

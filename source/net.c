@@ -208,14 +208,15 @@ int net_download(App *app, int gen, const char *url, Mp3Stream *stream) {
 
 /* Protocol adapted from amdray/yandex_music_psp, ym_api_download.c (MIT).
  * This is a client protocol key, not a user's OAuth token. */
-int net_file_info_path(const char *id, char *out, size_t cap) {
+int net_file_info_path(const char *id, bool high_quality, char *out, size_t cap) {
     static const char secret[] = "kzqU4XhfCaY6B6JTHODeq5";
     if (!ym_id_valid(id)) return -1;
     time_t now = time(NULL) + server_offset;
     if (now < 1700000000) return -1;
     char input[128], encoded[128], b64[64];
     unsigned char digest[32];
-    int n = snprintf(input, sizeof(input), "%lld%snqmp3raw", (long long)now, id);
+    const char *quality = high_quality ? "hq" : "nq";
+    int n = snprintf(input, sizeof(input), "%lld%s%smp3raw", (long long)now, id, quality);
     const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (!md || n < 0 || (size_t)n >= sizeof(input) ||
         mbedtls_md_hmac(md, (const unsigned char *)secret, strlen(secret),
@@ -232,7 +233,7 @@ int net_file_info_path(const char *id, char *out, size_t cap) {
         } else encoded[used++] = (char)c;
     }
     encoded[used] = 0;
-    n = snprintf(out, cap, "/get-file-info?ts=%lld&trackId=%s&quality=nq&codecs=mp3&sign=%s&transports=raw",
-                 (long long)now, id, encoded);
+    n = snprintf(out, cap, "/get-file-info?ts=%lld&trackId=%s&quality=%s&codecs=mp3&sign=%s&transports=raw",
+                 (long long)now, id, quality, encoded);
     return n >= 0 && (size_t)n < cap ? 0 : -1;
 }

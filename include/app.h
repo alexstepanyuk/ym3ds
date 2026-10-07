@@ -14,12 +14,14 @@ typedef struct {
     atomic_int generation;
     atomic_bool quitting;
     atomic_bool paused;
+    atomic_int seek_seconds;
     int job; /* -3: playlists, -2: likes, -1: none, <= -4: open playlist */
     int count;
     int playing;
     bool loading;
     bool audio_ready;
     bool shuffle, repeat_one;
+    bool high_quality;
     unsigned downloaded_kb;
     unsigned download_total_kb;
     bool download_complete;
@@ -33,6 +35,7 @@ typedef struct {
     bool playlist_view;
     bool hydration_pending;
     unsigned library_revision;
+    unsigned playback_revision;
     char uid[YM_ID_SIZE], collection[YM_TEXT_SIZE];
     unsigned char *cover_pixels;
     unsigned cover_revision;

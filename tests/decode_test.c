@@ -67,6 +67,15 @@ int main(int argc, char **argv) {
         offset += n;
     }
     assert(!stream->last_error && offset == full.samples);
+    /* Byte seeking must restart decoding without a full-file sample index.
+     * Exercise backwards, forwards and rewind on the real MP3 fixture. */
+    const uint64_t seek_bytes[] = {(uint64_t)size / 2, (uint64_t)size / 4, stream->start_offset};
+    for (size_t i = 0; i < sizeof(seek_bytes) / sizeof(*seek_bytes); ++i) {
+        assert(!mp3dec_ex_seek(stream, seek_bytes[i]));
+        n = mp3dec_ex_read(stream, pcm, 8192);
+        assert(n > 0 && !stream->last_error);
+        assert(stream->info.hz == full.hz && stream->info.channels == full.channels);
+    }
     printf("УСПЕШНО: блочное чтение MP3, %zu отсчётов, %d Гц, %d каналов\n", offset, full.hz, full.channels);
     mp3dec_ex_close(stream);
     Producer producer = {.bytes = bytes, .size = (size_t)size};

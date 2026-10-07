@@ -18,8 +18,8 @@ static bool cover_texture_ready, cover_visible;
 static unsigned uploaded_cover;
 static unsigned char cover_upload[128 * 128 * 4];
 static const Tex3DS_SubTexture cover_subtexture = {
-    .width = 100, .height = 100, .left = 0, .top = 1,
-    .right = 100.0f / 128, .bottom = 28.0f / 128
+    .width = 128, .height = 128, .left = 0, .top = 1,
+    .right = 1, .bottom = 0
 };
 #define LIST_ROWS 6
 #define LIST_Y 38
@@ -57,13 +57,14 @@ static void text(const char *s, float x, float y, float scale, float width, u32 
     }
 }
 
-static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, bool exiting) {
+static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, bool exiting,
+                 bool settings_open, int setting_selected) {
     YmTrack current = {0}, rows[LIST_ROWS] = {0};
     char status[256], label[128], collection[YM_TEXT_SIZE];
     int count, playing, start;
     unsigned kb, total_kb;
     bool download_complete;
-    bool loading, shuffle, repeat_one, playlist_view, update_cover = false;
+    bool loading, shuffle, repeat_one, high_quality, playlist_view, update_cover = false;
     unsigned position;
     int rate, bitrate;
     LightLock_Lock(&app.lock);
@@ -74,6 +75,7 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     loading = app.loading;
     shuffle = app.shuffle;
     repeat_one = app.repeat_one;
+    high_quality = app.high_quality;
     kb = app.downloaded_kb;
     total_kb = app.download_total_kb;
     download_complete = app.download_complete;
@@ -123,8 +125,8 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     C2D_DrawCircleSolid(78, 129, 0, 31, C2D_Color32(44, 44, 44, 255));
     C2D_DrawCircleSolid(78, 129, 0, 15, accent);
     C2D_DrawCircleSolid(78, 129, 0, 3, background);
-    if (draw_cover) C2D_DrawImageAt((C2D_Image){&cover_texture, &cover_subtexture}, 12, 63, 0, NULL, 1.32f, 1.32f);
-    text("MP3", 159, 62, 0.36f, 48, accent, false);
+    if (draw_cover) C2D_DrawImageAt((C2D_Image){&cover_texture, &cover_subtexture}, 12, 63, 0, NULL, 132.0f / 128, 132.0f / 128);
+    text(high_quality ? "MP3 · 320" : "MP3 · 192", 159, 62, 0.36f, 140, accent, false);
     text(current.title[0] ? current.title : "Яндекс Музыка", 159, 84, 0.57f, 229, white, false);
     text(current.artist, 159, 108, 0.43f, 229, muted, false);
     unsigned shown_position = playing >= 0 ? position : 0;
@@ -147,7 +149,7 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
         snprintf(label, sizeof(label), "%d кбит/с", bitrate);
         text(label, 287, 173, 0.40f, 101, muted, false);
     }
-    text(exiting ? "Завершаю операцию…" : paused ? "Пауза — A: продолжить" : status,
+    text(exiting ? "Завершаю операцию…" : paused ? "Пауза — Y: продолжить" : status,
          12, 207, 0.40f, 376, paused ? accent : muted, false);
     if (loading && !download_complete && kb) {
         if (total_kb) snprintf(label, sizeof(label), "%s: %u%% · %u КБ", paused ? "Пауза / загрузка" : "Загрузка", (unsigned)(downloaded * 100), kb);
@@ -159,6 +161,21 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
 
     C2D_TargetClear(bottom, background);
     C2D_SceneBegin(bottom);
+    if (settings_open) {
+        text("Настройки", 12, 8, 0.57f, 296, white, false);
+        C2D_DrawRectSolid(12, 30, 0, 296, 1, muted);
+        for (int i = 0; i < 3; ++i) {
+            float y = 43 + i * 36;
+            if (i == setting_selected) C2D_DrawRectSolid(8, y + 2, 0, 3, 24, accent);
+            if (i == 0) snprintf(label, sizeof(label), "Битрейт: %d кбит/с", high_quality ? 320 : 192);
+            else if (i == 1) snprintf(label, sizeof(label), "Перемешивание: %s", shuffle ? "вкл" : "выкл");
+            else snprintf(label, sizeof(label), "Повтор песни: %s", repeat_one ? "вкл" : "выкл");
+            text(label, 18, y, 0.49f, 290, white, false);
+        }
+        text("Битрейт — со следующего запуска", 12, 188, 0.35f, 296, muted, false);
+        text("↑/↓: пункт  ←/→ или A: изменить", 12, 210, 0.37f, 296, white, false);
+        text("SELECT / B: закрыть  Y: пауза", 12, 226, 0.37f, 296, muted, false);
+    } else {
     ym_text_copy(label, 81, collection);
     size_t label_size = strlen(label);
     snprintf(label + label_size, sizeof(label) - label_size, "  %d/%d", count ? selected + 1 : 0, count);
@@ -172,9 +189,9 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     }
     if (!count) text("X — библиотека\nТокен: /3ds/ym3ds/config/token.txt", 12, 58, 0.45f, 296, muted, true);
     C2D_DrawRectSolid(12, 208, 0, 296, 1, muted);
-    text(playlist_view ? "A: открыть  X: любимые  B: назад" : "A: играть/пауза  L/R: трек  X: списки", 12, 211, 0.40f, 296, white, false);
-    snprintf(label, sizeof(label), "Y: микс %s  SELECT: повтор %s", shuffle ? "вкл" : "выкл", repeat_one ? "1" : "выкл");
-    text(label, 12, 226, 0.37f, 296, muted, false);
+    text(playlist_view ? "A: открыть  X: любимые  B: назад" : "A: играть  Y: пауза  L/R: трек", 12, 211, 0.40f, 296, white, false);
+    text("SELECT: настройки  X: списки  B: стоп", 12, 226, 0.37f, 296, muted, false);
+    }
     C3D_FrameEnd(0);
 }
 
@@ -199,6 +216,7 @@ int main(void) {
     atomic_init(&app.generation, 1);
     atomic_init(&app.quitting, false);
     atomic_init(&app.paused, false);
+    atomic_init(&app.seek_seconds, 0);
     srand((unsigned)time(NULL));
     strcpy(app.collection, "Мне нравится");
     cover_texture_ready = C3D_TexInit(&cover_texture, 128, 128, GPU_RGBA8);
@@ -233,9 +251,37 @@ int main(void) {
     else app_status(&app, "Не удалось запустить сеть или рабочий поток");
     int selected = 0;
     unsigned library_revision = 0;
+    unsigned playback_revision = 0;
+    u32 shoulder = 0;
+    u64 shoulder_started = 0, shoulder_repeat = 0;
+    bool shoulder_seeking = false;
+    bool settings_open = false;
+    int setting_selected = 0;
+    bool old_sleep_allowed = aptIsSleepAllowed();
+    aptSetSleepAllowed(false);
+    bool lcd_ready = R_SUCCEEDED(gspLcdInit()), lid_closed = false;
     while (aptMainLoop()) {
+        u8 shell = 1;
+        if (battery_ready && R_SUCCEEDED(PTMU_GetShellState(&shell))) {
+            bool closed = shell == 0;
+            if (closed != lid_closed) {
+                if (lcd_ready) {
+                    if (closed) GSPLCD_PowerOffAllBacklights();
+                    else GSPLCD_PowerOnAllBacklights();
+                }
+                GSPGPU_SetLcdForceBlack(closed ? 1 : 0);
+                lid_closed = closed;
+            }
+        }
+        if (lid_closed) {
+            shoulder = 0;
+            svcSleepThread(50000000);
+            continue;
+        }
         hidScanInput();
         u32 keys = hidKeysDown();
+        u32 held = hidKeysHeld(), released = hidKeysUp();
+        u32 track_key = 0;
         if (keys & KEY_START) break;
         LightLock_Lock(&app.lock);
         bool playlist_view = app.playlist_view;
@@ -243,8 +289,29 @@ int main(void) {
         if (library_revision != app.library_revision) { selected = 0; library_revision = app.library_revision; }
         bool busy = app.loading;
         int playing = app.playing;
+        if (!playlist_view && playing >= 0 && playing < app.count &&
+            playback_revision != app.playback_revision) {
+            selected = playing;
+            playback_revision = app.playback_revision;
+        }
         LightLock_Unlock(&app.lock);
         if (selected >= count) selected = count ? count - 1 : 0;
+        if (keys & KEY_SELECT) { settings_open = !settings_open; shoulder = 0; }
+        if (settings_open) {
+            if ((keys & KEY_UP) && setting_selected > 0) --setting_selected;
+            if ((keys & KEY_DOWN) && setting_selected < 2) ++setting_selected;
+            if (keys & (KEY_A | KEY_LEFT | KEY_RIGHT)) {
+                LightLock_Lock(&app.lock);
+                if (setting_selected == 0) app.high_quality = !app.high_quality;
+                else if (setting_selected == 1) app.shuffle = !app.shuffle;
+                else app.repeat_one = !app.repeat_one;
+                LightLock_Unlock(&app.lock);
+            }
+            if (keys & KEY_Y) app_toggle_pause(&app);
+            if (keys & KEY_B) settings_open = false;
+            draw(top, bottom, selected, false, settings_open, setting_selected);
+            continue;
+        }
         if ((keys & KEY_DOWN) && selected + 1 < count) ++selected;
         if ((keys & KEY_UP) && selected > 0) --selected;
         if ((keys & KEY_RIGHT) && count) selected = selected + LIST_ROWS < count ? selected + LIST_ROWS : count - 1;
@@ -259,20 +326,32 @@ int main(void) {
         }
         if ((keys & KEY_A) && worker && count) {
             if (playlist_view) app_request(&app, -4 - selected);
-            else if (selected == playing) app_toggle_pause(&app);
             else app_request(&app, selected);
         }
         if ((keys & KEY_X) && worker) app_request(&app, playlist_view ? -2 : -3);
-        if (keys & (KEY_Y | KEY_SELECT)) {
-            LightLock_Lock(&app.lock);
-            if (keys & KEY_Y) app.shuffle = !app.shuffle;
-            if (keys & KEY_SELECT) app.repeat_one = !app.repeat_one;
-            LightLock_Unlock(&app.lock);
+        u64 now_ms = osGetTime();
+        if (keys & KEY_Y) app_toggle_pause(&app);
+        if (keys & (KEY_L | KEY_R)) {
+            shoulder = keys & KEY_L ? KEY_L : KEY_R;
+            shoulder_started = shoulder_repeat = now_ms;
+            shoulder_seeking = false;
         }
-        if ((keys & (KEY_L | KEY_R)) && worker && count && !playlist_view) {
+        if (shoulder && (held & shoulder) && now_ms - shoulder_started >= 600) {
+            if (!shoulder_seeking || now_ms - shoulder_repeat >= 600) {
+                if (playing >= 0 && !playlist_view)
+                    atomic_fetch_add(&app.seek_seconds, shoulder == KEY_L ? -10 : 10);
+                shoulder_seeking = true;
+                shoulder_repeat = now_ms;
+            }
+        }
+        if (shoulder && (released & shoulder)) {
+            if (!shoulder_seeking) track_key = shoulder;
+            shoulder = 0;
+        }
+        if (track_key && worker && count && !playlist_view) {
             LightLock_Lock(&app.lock);
             int base = app.playing >= 0 ? app.playing : selected;
-            bool previous = (keys & KEY_L) != 0;
+            bool previous = track_key == KEY_L;
             int next = ym_track_next(app.tracks, app.count, base, previous ? -1 : 1,
                                      !previous && app.shuffle, (unsigned)rand());
             LightLock_Unlock(&app.lock);
@@ -286,13 +365,19 @@ int main(void) {
             }
             else { app_request(&app, -1); app_status(&app, "Остановлено"); }
         }
-        draw(top, bottom, selected, false);
+        draw(top, bottom, selected, false, settings_open, setting_selected);
     }
     atomic_store(&app.quitting, true);
+    if (lid_closed) {
+        if (lcd_ready) GSPLCD_PowerOnAllBacklights();
+        GSPGPU_SetLcdForceBlack(0);
+    }
+    if (lcd_ready) gspLcdExit();
+    aptSetSleepAllowed(old_sleep_allowed);
     if (worker) {
         while (R_FAILED(threadJoin(worker, 0))) {
             /* Keep exit responsive while curl finishes/cancels its request. */
-            draw(top, bottom, selected, true);
+            draw(top, bottom, selected, true, false, 0);
         }
         threadFree(worker);
     }

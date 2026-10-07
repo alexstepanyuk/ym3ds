@@ -75,6 +75,39 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
     int rc = 0, index = 0;
     uint64_t completed_samples = 0;
     while (!app_cancelled(app, gen)) {
+        int seek_seconds = atomic_exchange(&app->seek_seconds, 0);
+        if (seek_seconds) {
+            /* Byte seeking avoids minimp3's sample-seek index, which scans
+             * the entire downloading stream. CBR position is approximate
+             * to one MP3 frame; VBR may have a larger timing error. */
+            int bitrate = decoder->info.bitrate_kbps;
+            if (bitrate <= 0) bitrate = 192;
+            int64_t target_ms = (int64_t)(completed_samples * 1000 / sample_rate) + (int64_t)seek_seconds * 1000;
+            if (target_ms < 0) target_ms = 0;
+            uint64_t offset = decoder->start_offset + (uint64_t)target_ms * (unsigned)bitrate / 8;
+            unsigned available = atomic_load(&stream->available);
+            /* Retain enough data to locate and decode complete MP3 frames. */
+            uint64_t last = available > 4096 ? available - 4096 : decoder->start_offset;
+            if (last < decoder->start_offset) last = decoder->start_offset;
+            if (offset > last) offset = last;
+            target_ms = (int64_t)((offset - decoder->start_offset) * 8 / (unsigned)bitrate);
+            LightLock_Lock(&app->lock);
+            ndspChnSetPaused(0, true);
+            ndspChnWaveBufClear(0);
+            LightLock_Unlock(&app->lock);
+            u32 seek_frame = ndspGetFrameCount();
+            for (int i = 0; i < 50 && (u32)(ndspGetFrameCount() - seek_frame) < 2; ++i)
+                svcSleepThread(2000000);
+            if (mp3dec_ex_seek(decoder, offset)) { rc = -1; break; }
+            memset(buffers, 0, sizeof(buffers));
+            for (int i = 0; i < BLOCKS; ++i) buffers[i].data_pcm16 = pcm + i * SAMPLES;
+            index = 0;
+            completed_samples = (uint64_t)target_ms * sample_rate / 1000;
+            LightLock_Lock(&app->lock);
+            app->position_ms = (unsigned)target_ms;
+            ndspChnSetPaused(0, atomic_load(&app->paused));
+            LightLock_Unlock(&app->lock);
+        }
         bool paused = atomic_load(&app->paused);
         ndspWaveBuf *b = &buffers[index];
         if (paused || (b->status != NDSP_WBUF_DONE && b->status != NDSP_WBUF_FREE)) {
@@ -96,7 +129,8 @@ int player_play(App *app, int gen, Mp3Stream *stream) {
                 for (int i = 0; i < BLOCKS; ++i)
                     if (buffers[i].status == NDSP_WBUF_QUEUED || buffers[i].status == NDSP_WBUF_PLAYING) queued = true;
                 if (queued) svcSleepThread(2000000);
-            } while (queued && !app_cancelled(app, gen));
+            } while (queued && !app_cancelled(app, gen) && !atomic_load(&app->seek_seconds));
+            if (!app_cancelled(app, gen) && atomic_load(&app->seek_seconds)) continue;
             break;
         }
         /* ndspChnGetRate returns a DSP rate ratio, not Hertz. Compare the
