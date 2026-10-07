@@ -106,6 +106,9 @@ int ym_tracks_parse(const char *json, YmTrack *tracks, size_t count) {
             YmTrack *t = &tracks[i];
             if (strcmp(t->id, id)) continue;
             ym_text_copy(t->title, sizeof(t->title), string(field(item, "title")));
+            cJSON *duration = field(item, "durationMs");
+            t->duration_ms = cJSON_IsNumber(duration) && duration->valuedouble > 0 &&
+                             duration->valuedouble < 86400000 ? (unsigned)duration->valuedouble : 0;
             t->artist[0] = 0;
             cJSON *artist;
             cJSON_ArrayForEach(artist, field(item, "artists")) {

@@ -31,6 +31,10 @@ int player_play(App *app, int gen) {
     }
     int channels = decoder->info.channels;
     int sample_rate = decoder->info.hz;
+    LightLock_Lock(&app->lock);
+    app->sample_rate = sample_rate;
+    app->bitrate_kbps = decoder->info.bitrate_kbps;
+    LightLock_Unlock(&app->lock);
     if ((channels != 1 && channels != 2) || decoder->info.hz < 8000 || decoder->info.hz > 48000) {
         mp3dec_ex_close(decoder); fclose(file); free(decoder); return -1;
     }
@@ -45,12 +49,19 @@ int player_play(App *app, int gen) {
     ndspChnSetMix(0, mix);
     for (int i = 0; i < BLOCKS; ++i) buffers[i].data_pcm16 = pcm + i * SAMPLES;
     int rc = 0, index = 0;
+    uint64_t completed_samples = 0;
     while (!app_cancelled(app, gen)) {
         bool paused = atomic_load(&app->paused);
         ndspChnSetPaused(0, paused);
         ndspWaveBuf *b = &buffers[index];
         if (paused || (b->status != NDSP_WBUF_DONE && b->status != NDSP_WBUF_FREE)) {
             svcSleepThread(2000000); continue;
+        }
+        if (b->status == NDSP_WBUF_DONE) {
+            completed_samples += b->nsamples;
+            LightLock_Lock(&app->lock);
+            app->position_ms = (unsigned)(completed_samples * 1000 / sample_rate);
+            LightLock_Unlock(&app->lock);
         }
         size_t n = mp3dec_ex_read(decoder, b->data_pcm16, SAMPLES);
         if (decoder->last_error || ferror(file)) { rc = -1; break; }

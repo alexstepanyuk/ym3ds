@@ -115,7 +115,10 @@ void app_worker(void *arg) {
         int job = app->job;
         int gen = atomic_load(&app->generation);
         app->job = -1;
-        if (job != -1) { app->loading = true; app->downloaded_kb = 0; }
+        if (job != -1) {
+            app->loading = true; app->downloaded_kb = 0;
+            app->position_ms = 0; app->sample_rate = 0; app->bitrate_kbps = 0;
+        }
         LightLock_Unlock(&app->lock);
         if (job == -1) { svcSleepThread(10000000); continue; }
         char token[512] = {0};

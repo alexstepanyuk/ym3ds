@@ -10,6 +10,7 @@ typedef struct {
     char id[YM_ID_SIZE];
     char title[YM_TEXT_SIZE];
     char artist[YM_TEXT_SIZE];
+    unsigned duration_ms;
     bool available;
 } YmTrack;
 

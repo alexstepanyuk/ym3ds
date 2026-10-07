@@ -19,6 +19,9 @@ typedef struct {
     bool loading;
     bool audio_ready;
     unsigned downloaded_kb;
+    unsigned position_ms;
+    int sample_rate;
+    int bitrate_kbps;
     char status[256];
     YmTrack tracks[YM_MAX_TRACKS];
 } App;
