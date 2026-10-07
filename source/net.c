@@ -21,6 +21,7 @@ typedef struct {
     FILE *file;
     const char *stage;
     time_t server_date;
+    Mp3Stream *stream;
 } Transfer;
 
 static size_t read_header(char *data, size_t size, size_t count, void *user) {
@@ -39,14 +40,15 @@ static size_t read_header(char *data, size_t size, size_t count, void *user) {
 
 static int progress(void *user, curl_off_t total, curl_off_t now,
                     curl_off_t upload_total, curl_off_t upload_now) {
-    (void)total; (void)upload_total; (void)upload_now;
+    (void)upload_total; (void)upload_now;
     Transfer *t = user;
     if (t->file) {
         LightLock_Lock(&t->app->lock);
         t->app->downloaded_kb = (unsigned)(now / 1024);
+        t->app->download_total_kb = total > 0 && total <= AUDIO_LIMIT ? (unsigned)((total + 1023) / 1024) : 0;
         LightLock_Unlock(&t->app->lock);
     }
-    return app_cancelled(t->app, t->generation);
+    return app_cancelled(t->app, t->generation) || (t->stream && atomic_load(&t->stream->stop));
 }
 
 static size_t write_body(char *data, size_t size, size_t n, void *user) {
@@ -54,10 +56,13 @@ static size_t write_body(char *data, size_t size, size_t n, void *user) {
     if (size && n > SIZE_MAX / size) return 0;
     size_t bytes = size * n;
     size_t limit = t->file ? AUDIO_LIMIT : JSON_LIMIT;
-    if (app_cancelled(t->app, t->generation) || bytes > limit - t->size) return 0;
+    if (app_cancelled(t->app, t->generation) ||
+        (t->stream && atomic_load(&t->stream->stop)) || bytes > limit - t->size) return 0;
     if (t->file) {
         size_t written = fwrite(data, 1, bytes, t->file);
         t->size += written;
+        if (written != bytes || fflush(t->file)) return 0;
+        if (t->stream) atomic_store(&t->stream->available, (unsigned)t->size);
         return written;
     }
     char *next = realloc(t->data, t->size + bytes + 1);
@@ -98,8 +103,13 @@ static int perform(CURL *curl, Transfer *t) {
     CURLcode rc = curl_easy_perform(curl);
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    if (app_cancelled(t->app, t->generation)) return -1;
+    if (app_cancelled(t->app, t->generation) || (t->stream && atomic_load(&t->stream->stop))) return -1;
+    if (rc == CURLE_HTTP_RETURNED_ERROR) {
+        if (t->stream) atomic_store(&t->stream->failed, true);
+        app_status(t->app, "%s: HTTP %ld", t->stage, status); return -1;
+    }
     if (rc != CURLE_OK) {
+        if (t->stream) atomic_store(&t->stream->failed, true);
         const char *message = "Ошибка сетевого запроса";
         switch (rc) {
             case CURLE_COULDNT_RESOLVE_HOST: message = "Не удалось найти сервер (DNS)"; break;
@@ -115,6 +125,7 @@ static int perform(CURL *curl, Transfer *t) {
     }
     if (!t->file && t->server_date) server_offset = t->server_date - time(NULL);
     if (status != 200 || !t->size) {
+        if (t->stream) atomic_store(&t->stream->failed, true);
         app_status(t->app, "%s: HTTP %ld", t->stage, status);
         return -1;
     }
@@ -151,26 +162,29 @@ int net_json(App *app, int gen, const char *path, const char *token,
     return rc;
 }
 
-int net_download(App *app, int gen, const char *url) {
+int net_download(App *app, int gen, const char *url, Mp3Stream *stream) {
     if (strncmp(url, "https://", 8)) return -1;
     const char *temp = YM_AUDIO_FILE ".part";
-    Transfer t = {.app = app, .generation = gen, .file = fopen(temp, "wb"), .stage = "Скачивание MP3"};
-    if (!t.file) { app_status(app, "Не удалось открыть кэш на SD"); return -1; }
+    Transfer t = {.app = app, .generation = gen, .file = fopen(temp, "wb"), .stage = "Скачивание MP3", .stream = stream};
+    if (!t.file) { atomic_store(&stream->failed, true); app_status(app, "Не удалось открыть кэш на SD"); return -1; }
     CURL *curl = request(&t, url);
     int rc = -1;
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
         rc = perform(curl, &t);
         curl_easy_cleanup(curl);
-    } else app_status(app, "Не удалось создать HTTP-запрос");
-    if (fclose(t.file)) { rc = -1; app_status(app, "Ошибка записи на SD"); }
+    } else { atomic_store(&stream->failed, true); app_status(app, "Не удалось создать HTTP-запрос"); }
+    if (fclose(t.file)) { rc = -1; atomic_store(&stream->failed, true); app_status(app, "Ошибка записи на SD"); }
     if (!rc && app_cancelled(app, gen)) rc = -1;
     if (!rc) {
-        remove(YM_AUDIO_FILE);
-        if (rename(temp, YM_AUDIO_FILE)) { rc = -1; app_status(app, "Ошибка сохранения кэша"); }
+        LightLock_Lock(&app->lock);
+        app->download_complete = true;
+        app->downloaded_kb = (unsigned)((t.size + 1023) / 1024);
+        app->download_total_kb = app->downloaded_kb;
+        LightLock_Unlock(&app->lock);
     }
-    if (rc) remove(temp);
     return rc;
 }
 

@@ -2,6 +2,7 @@
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_NO_SIMD
 #define MINIMP3_NO_STDIO
+#define MINIMP3_IO_SIZE (32 * 1024)
 #include "minimp3_ex.h"
 #include "app.h"
 #include <stdio.h>
@@ -13,19 +14,40 @@
 #define BLOCKS 4
 #define SAMPLES 8192
 
-static size_t read_mp3(void *buf, size_t size, void *user) {
-    return fread(buf, 1, size, user);
+typedef struct { App *app; int generation; bool waiting; } Playback;
+static bool cancelled(void *user) {
+    Playback *p = user;
+    return app_cancelled(p->app, p->generation);
 }
-static int seek_mp3(uint64_t pos, void *user) {
-    return pos <= LONG_MAX ? fseek(user, (long)pos, SEEK_SET) : -1;
+static void wait_data(void *user) {
+    Playback *p = user;
+    if (!p->waiting) { app_status(p->app, "Буферизация: жду данные…"); p->waiting = true; }
+    ndspChnSetPaused(0, atomic_load(&p->app->paused));
+    svcSleepThread(2000000);
+}
+static size_t read_mp3(void *buf, size_t size, void *user) {
+    Mp3Reader *r = user;
+    size_t n = mp3_stream_read(buf, size, r);
+    Playback *p = r->user;
+    if (p->waiting && n && !cancelled(p)) {
+        LightLock_Lock(&p->app->lock);
+        if (!atomic_load(&r->stream->failed)) {
+            strcpy(p->app->status, "Воспроизведение"); p->waiting = false;
+        }
+        LightLock_Unlock(&p->app->lock);
+    }
+    return n;
 }
 
-int player_play(App *app, int gen) {
+int player_play(App *app, int gen, Mp3Stream *stream) {
     mp3dec_ex_t *decoder = calloc(1, sizeof(*decoder));
     if (!decoder) return -1;
-    FILE *file = fopen(YM_AUDIO_FILE, "rb");
+    FILE *file = fopen(YM_AUDIO_FILE ".part", "rb");
     if (!file) { free(decoder); return -1; }
-    mp3dec_io_t io = {.read = read_mp3, .read_data = file, .seek = seek_mp3, .seek_data = file};
+    Playback playback = {.app = app, .generation = gen};
+    Mp3Reader reader = {.file = file, .stream = stream, .user = &playback,
+        .cancelled = cancelled, .wait = wait_data};
+    mp3dec_io_t io = {.read = read_mp3, .read_data = &reader, .seek = mp3_stream_seek, .seek_data = &reader};
     if (mp3dec_ex_open_cb(decoder, &io, MP3D_DO_NOT_SCAN)) {
         mp3dec_ex_close(decoder); fclose(file); free(decoder); return -1;
     }
@@ -64,7 +86,7 @@ int player_play(App *app, int gen) {
             LightLock_Unlock(&app->lock);
         }
         size_t n = mp3dec_ex_read(decoder, b->data_pcm16, SAMPLES);
-        if (decoder->last_error || ferror(file)) { rc = -1; break; }
+        if (decoder->last_error || reader.failed || ferror(file) || atomic_load(&stream->failed)) { rc = -1; break; }
         if (!n) {
             /* Drain the queued final blocks without dropping the end. */
             bool queued;

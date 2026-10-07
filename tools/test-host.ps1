@@ -9,7 +9,7 @@ try {
     & ./build/host/model_test.exe
     if ($LASTEXITCODE) { throw 'Проверки API завершились с ошибкой' }
     if ($Mp3) {
-        & $Zig cc -std=c11 -O2 -UNDEBUG -Wall -Wextra -Werror -Ivendor/minimp3 tests/decode_test.c -o build/host/decode_test.exe
+        & $Zig cc -std=c11 -O2 -UNDEBUG -Wall -Wextra -Werror -Iinclude -Ivendor/minimp3 source/stream.c tests/decode_test.c -o build/host/decode_test.exe
         if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку MP3' }
         & ./build/host/decode_test.exe $Mp3
         if ($LASTEXITCODE) { throw 'Проверка MP3 завершилась с ошибкой' }

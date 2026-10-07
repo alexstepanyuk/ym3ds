@@ -53,7 +53,8 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     YmTrack current = {0}, rows[LIST_ROWS] = {0};
     char status[256], label[64];
     int count, playing, start;
-    unsigned kb;
+    unsigned kb, total_kb;
+    bool download_complete;
     bool loading;
     unsigned position;
     int rate, bitrate;
@@ -62,6 +63,8 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     playing = app.playing;
     loading = app.loading;
     kb = app.downloaded_kb;
+    total_kb = app.download_total_kb;
+    download_complete = app.download_complete;
     position = app.position_ms;
     rate = app.sample_rate;
     bitrate = app.bitrate_kbps;
@@ -102,6 +105,10 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
     float progress = current.duration_ms ? (float)shown_position / current.duration_ms : 0;
     if (progress > 1) progress = 1;
     C2D_DrawRectSolid(159, 160, 0, 229, 4, muted);
+    float downloaded = download_complete ? 1 : total_kb ? (float)kb / total_kb : 0;
+    if (downloaded > 1) downloaded = 1;
+    if (playing >= 0 && downloaded > 0)
+        C2D_DrawRectSolid(159, 160, 0, 229 * downloaded, 4, C2D_Color32(112, 151, 178, 255));
     if (progress > 0) C2D_DrawRectSolid(159, 160, 0, 229 * progress, 4, accent);
     if (rate) snprintf(label, sizeof(label), "%.1f кГц", rate / 1000.0);
     else strcpy(label, "MP3 / SD");
@@ -111,8 +118,9 @@ static void draw(C3D_RenderTarget *top, C3D_RenderTarget *bottom, int selected, 
         text(label, 287, 173, 0.40f, 101, muted, false);
     }
     text(exiting ? "Завершаю операцию…" : status, 12, 207, 0.40f, 376, muted, false);
-    if (loading && playing < 0 && kb) {
-        snprintf(label, sizeof(label), "Загружено: %u КБ", kb);
+    if (loading && !download_complete && kb) {
+        if (total_kb) snprintf(label, sizeof(label), "Загрузка: %u%% · %u КБ", (unsigned)(downloaded * 100), kb);
+        else snprintf(label, sizeof(label), "Загружено: %u КБ", kb);
         text(label, 159, 190, 0.35f, 229, accent, false);
     } else if (playing >= 0) {
         text(atomic_load(&app.paused) ? "Пауза" : "Воспроизведение", 159, 190, 0.35f, 229, accent, false);

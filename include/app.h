@@ -2,6 +2,7 @@
 #include <3ds.h>
 #include <stdatomic.h>
 #include "model.h"
+#include "stream.h"
 
 #define YM_BASE "sdmc:/3ds/ym3ds"
 #define YM_TOKEN_FILE YM_BASE "/config/token.txt"
@@ -19,6 +20,8 @@ typedef struct {
     bool loading;
     bool audio_ready;
     unsigned downloaded_kb;
+    unsigned download_total_kb;
+    bool download_complete;
     unsigned position_ms;
     int sample_rate;
     int bitrate_kbps;
@@ -30,4 +33,4 @@ void app_status(App *app, const char *format, ...);
 bool app_cancelled(App *app, int generation);
 void app_worker(void *arg);
 void app_request(App *app, int job);
-int player_play(App *app, int generation);
+int player_play(App *app, int generation, Mp3Stream *stream);

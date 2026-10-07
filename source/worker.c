@@ -78,6 +78,20 @@ static int library_load(App *app, int gen, const char *token) {
     return 0;
 }
 
+typedef struct {
+    App *app;
+    int generation, result;
+    const char *url;
+    Mp3Stream stream;
+} Download;
+
+static void download_worker(void *user) {
+    Download *d = user;
+    d->result = net_download(d->app, d->generation, d->url, &d->stream);
+    if (d->result && !atomic_load(&d->stream.stop)) atomic_store(&d->stream.failed, true);
+    atomic_store(&d->stream.done, true);
+}
+
 static void play(App *app, int gen, int index, const char *token) {
     YmTrack track;
     LightLock_Lock(&app->lock);
@@ -96,15 +110,44 @@ static void play(App *app, int gen, int index, const char *token) {
     int rc = ym_download_parse(json, url, sizeof(url));
     free(json);
     if (rc) { app_status(app, "API не вернул открытый MP3/raw"); return; }
-    app_status(app, "Загружаю трек на SD…");
-    if (net_download(app, gen, url)) return;
-    if (app_cancelled(app, gen)) return;
+    Download download = {.app = app, .generation = gen, .url = url};
+    mp3_stream_init(&download.stream);
+    /* Truncate before starting either reader or writer, so an old .part
+     * can never be mistaken for the newly selected track. */
+    FILE *empty = fopen(YM_AUDIO_FILE ".part", "wb");
+    if (!empty) { app_status(app, "Не удалось открыть кэш на SD"); return; }
+    if (fclose(empty)) { app_status(app, "Ошибка записи на SD"); return; }
+    s32 priority = 0x31;
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    app_status(app, "Буферизация: загружаю начало…");
+    Thread downloader = threadCreate(download_worker, &download, 128 * 1024, priority + 1, 0, false);
+    if (!downloader) { remove(YM_AUDIO_FILE ".part"); app_status(app, "Не удалось запустить загрузку"); return; }
     LightLock_Lock(&app->lock);
     app->playing = index;
     LightLock_Unlock(&app->lock);
-    app_status(app, "Воспроизведение");
-    rc = player_play(app, gen);
-    if (!app_cancelled(app, gen))
+    /* About 2.7 s at 192 kbit/s. Small files start once fully downloaded. */
+    while (atomic_load(&download.stream.available) < 64 * 1024 &&
+           !atomic_load(&download.stream.done) && !app_cancelled(app, gen))
+        svcSleepThread(2000000);
+    rc = -1;
+    if (!app_cancelled(app, gen) && !atomic_load(&download.stream.failed)) {
+        LightLock_Lock(&app->lock);
+        if (!atomic_load(&download.stream.failed)) strcpy(app->status, "Воспроизведение");
+        LightLock_Unlock(&app->lock);
+        rc = player_play(app, gen, &download.stream);
+    }
+    /* Reader is closed now. Stop and join writer before touching its file
+     * or returning (Download and URL live on this stack). */
+    atomic_store(&download.stream.stop, true);
+    threadJoin(downloader, U64_MAX);
+    threadFree(downloader);
+    if (!download.result && !app_cancelled(app, gen)) {
+        remove(YM_AUDIO_FILE);
+        if (rename(YM_AUDIO_FILE ".part", YM_AUDIO_FILE)) {
+            app_status(app, "Ошибка сохранения кэша"); return;
+        }
+    } else remove(YM_AUDIO_FILE ".part");
+    if (!app_cancelled(app, gen) && !atomic_load(&download.stream.failed))
         app_status(app, rc ? "Ошибка декодирования MP3" : "Трек завершён");
 }
 
@@ -117,6 +160,7 @@ void app_worker(void *arg) {
         app->job = -1;
         if (job != -1) {
             app->loading = true; app->downloaded_kb = 0;
+            app->download_total_kb = 0; app->download_complete = false;
             app->position_ms = 0; app->sample_rate = 0; app->bitrate_kbps = 0;
         }
         LightLock_Unlock(&app->lock);

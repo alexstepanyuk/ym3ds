@@ -8,6 +8,8 @@ Copyright (c) 2026 amdray; лицензия MIT сохранена в `LICENSE.u
 - cJSON 1.7.19 — исходники и лицензия MIT в `vendor/cjson`.
 - minimp3 — исходники и документ CC0 в `vendor/minimp3`.
   Коммит `ea99364f61c14656440e8d77e9c233ccf3124633`.
+  В `minimp3_ex.h` добавлена возможность переопределить `MINIMP3_IO_SIZE`;
+  плеер использует буфер 32 КиБ вместо стандартных 128 КиБ.
 - Сертификаты CA Mozilla получены с https://curl.se/ca/cacert.pem
   07.10.2026; происхождение и лицензия указаны в заголовке PEM.
 - Сборка для Nintendo 3DS использует devkitPro libctru, citro2d, citro3d,
