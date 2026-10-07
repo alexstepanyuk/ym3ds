@@ -30,6 +30,7 @@ int player_play(App *app, int gen) {
         mp3dec_ex_close(decoder); fclose(file); free(decoder); return -1;
     }
     int channels = decoder->info.channels;
+    int sample_rate = decoder->info.hz;
     if ((channels != 1 && channels != 2) || decoder->info.hz < 8000 || decoder->info.hz > 48000) {
         mp3dec_ex_close(decoder); fclose(file); free(decoder); return -1;
     }
@@ -38,7 +39,7 @@ int player_play(App *app, int gen) {
     ndspWaveBuf buffers[BLOCKS] = {0};
     ndspChnReset(0);
     ndspChnSetFormat(0, channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
-    ndspChnSetRate(0, (float)decoder->info.hz);
+    ndspChnSetRate(0, (float)sample_rate);
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
     float mix[12] = {1.0f, 1.0f};
     ndspChnSetMix(0, mix);
@@ -65,7 +66,9 @@ int player_play(App *app, int gen) {
             } while (queued && !app_cancelled(app, gen));
             break;
         }
-        if (decoder->info.channels != channels || decoder->info.hz != (int)ndspChnGetRate(0) || n % channels) {
+        /* ndspChnGetRate returns a DSP rate ratio, not Hertz. Compare the
+         * decoder against the original stream format instead. */
+        if (decoder->info.channels != channels || decoder->info.hz != sample_rate || n % channels) {
             rc = -1; break;
         }
         b->nsamples = (u32)(n / channels);
