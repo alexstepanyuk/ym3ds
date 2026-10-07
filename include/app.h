@@ -14,6 +14,7 @@ typedef struct {
     atomic_int generation;
     atomic_bool quitting;
     atomic_bool paused;
+    atomic_bool lid_closed;
     atomic_int seek_seconds;
     int job; /* -3: playlists, -2: likes, -1: none, <= -4: open playlist */
     int count;

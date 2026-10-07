@@ -1,4 +1,5 @@
 #include "net.h"
+#include "replay.h"
 #include <mbedtls/md.h>
 #include <mbedtls/base64.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@ typedef struct {
     Mp3Stream *stream;
     size_t limit;
     bool silent;
+    FILE *prefix;
+    size_t prefix_size, verified, received;
 } Transfer;
 
 static size_t read_header(char *data, size_t size, size_t count, void *user) {
@@ -42,11 +45,11 @@ static size_t read_header(char *data, size_t size, size_t count, void *user) {
 
 static int progress(void *user, curl_off_t total, curl_off_t now,
                     curl_off_t upload_total, curl_off_t upload_now) {
-    (void)upload_total; (void)upload_now;
+    (void)now; (void)upload_total; (void)upload_now;
     Transfer *t = user;
     if (t->file) {
         LightLock_Lock(&t->app->lock);
-        t->app->downloaded_kb = (unsigned)(now / 1024);
+        t->app->downloaded_kb = (unsigned)(t->size / 1024);
         t->app->download_total_kb = total > 0 && total <= AUDIO_LIMIT ? (unsigned)((total + 1023) / 1024) : 0;
         LightLock_Unlock(&t->app->lock);
     }
@@ -59,14 +62,15 @@ static size_t write_body(char *data, size_t size, size_t n, void *user) {
     size_t bytes = size * n;
     size_t limit = t->limit ? t->limit : t->file ? AUDIO_LIMIT : JSON_LIMIT;
     if (app_cancelled(t->app, t->generation) ||
-        (t->stream && atomic_load(&t->stream->stop)) || bytes > limit - t->size) return 0;
+        (t->stream && atomic_load(&t->stream->stop))) return 0;
     if (t->file) {
-        size_t written = fwrite(data, 1, bytes, t->file);
-        t->size += written;
-        if (written != bytes || fflush(t->file)) return 0;
+        if (!mp3_replay_write(t->file, t->prefix, t->prefix_size, &t->verified,
+                              data, bytes, &t->size, limit)) return 0;
+        t->received += bytes;
         if (t->stream) atomic_store(&t->stream->available, (unsigned)t->size);
-        return written;
+        return bytes;
     }
+    if (bytes > limit - t->size) return 0;
     char *next = realloc(t->data, t->size + bytes + 1);
     if (!next) return 0;
     t->data = next;
@@ -98,13 +102,59 @@ static CURL *request(Transfer *t, const char *url) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, t);
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 0L);
     return curl;
 }
 
+static bool transfer_stopped(Transfer *t) {
+    return app_cancelled(t->app, t->generation) || (t->stream && atomic_load(&t->stream->stop));
+}
+
+static bool retry_wait(Transfer *t, unsigned delay_ms) {
+    /* A closed lid may disconnect Wi-Fi even though apt sleep is denied.
+     * Preserve the producer and pause state until the console is reopened. */
+    while (atomic_load(&t->app->lid_closed)) {
+        if (transfer_stopped(t)) return false;
+        svcSleepThread(50000000);
+    }
+    for (unsigned elapsed = 0; elapsed < delay_ms; elapsed += 50) {
+        if (transfer_stopped(t)) return false;
+        svcSleepThread(50000000);
+    }
+    return !transfer_stopped(t);
+}
+
 static int perform(CURL *curl, Transfer *t) {
-    CURLcode rc = curl_easy_perform(curl);
+    CURLcode rc = CURLE_OK;
     long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    for (unsigned attempt = 0;; ++attempt) {
+        if (transfer_stopped(t)) return -1;
+        /* A lid/network transition can invalidate curl's internal multi
+         * polling state. Retries use a new easy/multi session, retaining
+         * only request options and the verified file prefix. */
+        CURL *active = attempt ? curl_easy_duphandle(curl) : curl;
+        if (!active) { rc = CURLE_OUT_OF_MEMORY; break; }
+        rc = curl_easy_perform(active);
+        curl_easy_getinfo(active, CURLINFO_RESPONSE_CODE, &status);
+        if (active != curl) curl_easy_cleanup(active);
+        if (transfer_stopped(t)) return -1;
+        bool transient = rc == CURLE_COULDNT_RESOLVE_HOST || rc == CURLE_COULDNT_CONNECT ||
+            rc == CURLE_OPERATION_TIMEDOUT || rc == CURLE_RECV_ERROR ||
+            rc == CURLE_SEND_ERROR || rc == CURLE_PARTIAL_FILE || rc == CURLE_GOT_NOTHING ||
+            rc == CURLE_BAD_FUNCTION_ARGUMENT;
+        if (t->silent || !transient || attempt >= 5) break;
+        app_status(t->app, "Восстанавливаю соединение… %u/5", attempt + 1);
+        if (!retry_wait(t, attempt < 3 ? 1000U << attempt : 8000U)) return -1;
+        if (t->file) {
+            if (t->prefix) fclose(t->prefix);
+            t->prefix = fopen(YM_AUDIO_FILE ".part", "rb");
+            if (!t->prefix) { rc = CURLE_READ_ERROR; break; }
+            t->prefix_size = t->size; t->verified = 0; t->received = 0;
+        } else {
+            free(t->data); t->data = NULL; t->size = 0; t->server_date = 0;
+        }
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+    }
     if (app_cancelled(t->app, t->generation) || (t->stream && atomic_load(&t->stream->stop))) return -1;
     if (t->silent) return rc == CURLE_OK && status == 200 && t->size ? 0 : -1;
     if (rc == CURLE_HTTP_RETURNED_ERROR) {
@@ -121,13 +171,14 @@ static int perform(CURL *curl, Transfer *t) {
             case CURLE_PEER_FAILED_VERIFICATION: message = "Проверь дату консоли и файл cacert.pem"; break;
             case CURLE_SSL_CACERT_BADFILE: message = "Не удалось прочитать cacert.pem"; break;
             case CURLE_WRITE_ERROR: message = "Ошибка записи или превышен лимит данных"; break;
+            case CURLE_BAD_FUNCTION_ARGUMENT: message = "Ошибка аргумента или состояния curl"; break;
             default: break;
         }
         app_status(t->app, "%s (код %d)", message, (int)rc);
         return -1;
     }
     if (!t->file && t->server_date) server_offset = t->server_date - time(NULL);
-    if (status != 200 || !t->size) {
+    if (status != 200 || !t->size || (t->file && (t->verified != t->prefix_size || t->received != t->size))) {
         if (t->stream) atomic_store(&t->stream->failed, true);
         app_status(t->app, "%s: HTTP %ld", t->stage, status);
         return -1;
@@ -195,6 +246,7 @@ int net_download(App *app, int gen, const char *url, Mp3Stream *stream) {
         curl_easy_cleanup(curl);
     } else { atomic_store(&stream->failed, true); app_status(app, "Не удалось создать HTTP-запрос"); }
     if (fclose(t.file)) { rc = -1; atomic_store(&stream->failed, true); app_status(app, "Ошибка записи на SD"); }
+    if (t.prefix) fclose(t.prefix);
     if (!rc && app_cancelled(app, gen)) rc = -1;
     if (!rc) {
         LightLock_Lock(&app->lock);

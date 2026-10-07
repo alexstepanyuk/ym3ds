@@ -12,6 +12,10 @@ try {
     if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку обложек' }
     & ./build/host/cover_test.exe
     if ($LASTEXITCODE) { throw 'Проверка обложек завершилась с ошибкой' }
+    & $Zig cc -std=c11 -UNDEBUG -Wall -Wextra -Werror -Iinclude source/replay.c tests/replay_test.c -o build/host/replay_test.exe
+    if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку восстановления загрузки' }
+    & ./build/host/replay_test.exe
+    if ($LASTEXITCODE) { throw 'Проверка восстановления загрузки завершилась с ошибкой' }
     if ($Mp3) {
         & $Zig cc -std=c11 -O2 -UNDEBUG -Wall -Wextra -Werror -Iinclude -Ivendor/minimp3 source/stream.c tests/decode_test.c -o build/host/decode_test.exe
         if ($LASTEXITCODE) { throw 'Не удалось скомпилировать проверку MP3' }

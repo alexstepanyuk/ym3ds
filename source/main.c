@@ -216,6 +216,7 @@ int main(void) {
     atomic_init(&app.generation, 1);
     atomic_init(&app.quitting, false);
     atomic_init(&app.paused, false);
+    atomic_init(&app.lid_closed, false);
     atomic_init(&app.seek_seconds, 0);
     srand((unsigned)time(NULL));
     strcpy(app.collection, "Мне нравится");
@@ -271,6 +272,7 @@ int main(void) {
                 }
                 GSPGPU_SetLcdForceBlack(closed ? 1 : 0);
                 lid_closed = closed;
+                atomic_store(&app.lid_closed, closed);
             }
         }
         if (lid_closed) {
