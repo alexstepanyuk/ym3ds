@@ -11,7 +11,7 @@ jobs:
       - name: Проверка библиотек контейнера
         run: |
           dkp-pacman -Q devkitARM libctru citro2d citro3d 3ds-curl 3ds-mbedtls 3ds-zlib
-          arm-none-eabi-gcc --version
+          "$DEVKITARM/bin/arm-none-eabi-gcc" --version
       - name: Компиляция
         run: make -j2
       - name: Подготовка файлов для SD
