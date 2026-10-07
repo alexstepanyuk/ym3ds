@@ -4,10 +4,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #define JSON_LIMIT (2 * 1024 * 1024)
 #define AUDIO_LIMIT (32 * 1024 * 1024)
+/* Accessed only by the network worker. Signed requests need UTC, while the
+ * console RTC may contain local time. Learn UTC from verified HTTPS replies. */
+static time_t server_offset;
 
 typedef struct {
     App *app;
@@ -15,7 +19,23 @@ typedef struct {
     char *data;
     size_t size;
     FILE *file;
+    const char *stage;
+    time_t server_date;
 } Transfer;
+
+static size_t read_header(char *data, size_t size, size_t count, void *user) {
+    if (size && count > SIZE_MAX / size) return 0;
+    size_t n = size * count;
+    Transfer *t = user;
+    if (n > 6 && n < 80 && !strncasecmp(data, "Date:", 5)) {
+        char date[80];
+        memcpy(date, data + 5, n - 5);
+        date[n - 5] = 0;
+        time_t parsed = curl_getdate(date, NULL);
+        if (parsed > 1700000000) t->server_date = parsed;
+    }
+    return n;
+}
 
 static int progress(void *user, curl_off_t total, curl_off_t now,
                     curl_off_t upload_total, curl_off_t upload_now) {
@@ -66,6 +86,8 @@ static CURL *request(Transfer *t, const char *url) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "YM3DS/0.1");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, t);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, read_header);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, t);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, t);
@@ -91,8 +113,9 @@ static int perform(CURL *curl, Transfer *t) {
         app_status(t->app, "%s (код %d)", message, (int)rc);
         return -1;
     }
+    if (!t->file && t->server_date) server_offset = t->server_date - time(NULL);
     if (status != 200 || !t->size) {
-        app_status(t->app, "HTTP %ld. Проверь токен и подписку.", status);
+        app_status(t->app, "%s: HTTP %ld", t->stage, status);
         return -1;
     }
     return 0;
@@ -105,11 +128,16 @@ int net_json(App *app, int gen, const char *path, const char *token,
     if (*path != '/' || strlen(path) + 29 >= sizeof(url) || strlen(token) > 450) return -1;
     snprintf(url, sizeof(url), "https://api.music.yandex.net%s", path);
     snprintf(auth, sizeof(auth), "Authorization: OAuth %s", token);
-    Transfer t = {.app = app, .generation = gen};
+    Transfer t = {.app = app, .generation = gen,
+        .stage = !strncmp(path, "/get-file-info?", 15) ? "Получение MP3" : "API библиотеки"};
     CURL *curl = request(&t, url);
     if (!curl) { app_status(app, "Не удалось создать HTTP-запрос"); return -1; }
     struct curl_slist *headers = curl_slist_append(NULL, auth);
     if (!headers) { curl_easy_cleanup(curl); return -1; }
+    struct curl_slist *next = curl_slist_append(headers,
+        "X-Yandex-Music-Client: YandexMusicDesktopAppWindows/5.23.2");
+    if (!next) { curl_slist_free_all(headers); curl_easy_cleanup(curl); return -1; }
+    headers = next;
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     /* Do not forward credentials through redirects. */
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
@@ -126,7 +154,7 @@ int net_json(App *app, int gen, const char *path, const char *token,
 int net_download(App *app, int gen, const char *url) {
     if (strncmp(url, "https://", 8)) return -1;
     const char *temp = YM_AUDIO_FILE ".part";
-    Transfer t = {.app = app, .generation = gen, .file = fopen(temp, "wb")};
+    Transfer t = {.app = app, .generation = gen, .file = fopen(temp, "wb"), .stage = "Скачивание MP3"};
     if (!t.file) { app_status(app, "Не удалось открыть кэш на SD"); return -1; }
     CURL *curl = request(&t, url);
     int rc = -1;
@@ -151,7 +179,7 @@ int net_download(App *app, int gen, const char *url) {
 int net_file_info_path(const char *id, char *out, size_t cap) {
     static const char secret[] = "kzqU4XhfCaY6B6JTHODeq5";
     if (!ym_id_valid(id)) return -1;
-    time_t now = time(NULL);
+    time_t now = time(NULL) + server_offset;
     if (now < 1700000000) return -1;
     char input[128], encoded[128], b64[64];
     unsigned char digest[32];
